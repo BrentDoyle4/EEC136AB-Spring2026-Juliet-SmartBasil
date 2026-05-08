@@ -1,7 +1,7 @@
 # Smart-Basil
 This is the final software/firmware for Team Juliet's Senior Design project, Smart Basil. This is for the course EEC 136AB.
 
-ESP-32 Model: ESP32-WROOM-32E
+ESP-32 Model: ESP32-WROOM-32E \
 Hardware:
   IIC/I2C/TWI Serial 2004/20x4 LCD Module Shield
   Adafruit Sensirion SHT31-D - Temperature & Humidity Sensor
