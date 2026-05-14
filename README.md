@@ -23,3 +23,5 @@ https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/syst
 https://www.adafruit.com/product/2857?srsltid=AfmBOoq6sUf0KYgegUS2jaGXSjTWLfTT970byqrNsVObSPZYE2J-I6SO \
 https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/2107/SEN0193_Web.pdf \
 http://wiki.sunfounder.cc/index.php?title=I2C_LCD2004 \
+https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/misc_system_api.html \
+https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/network/esp_wifi.html 
