@@ -1,10 +1,13 @@
 /*
- * Smart Basil - Automated Plant Watering System
+ * Smart Basil - Automated Plant Watering System with WiFi Web Interface
  * 
  * This ESP32-based system monitors soil moisture, temperature, and humidity to
- * automatically control a water pump. It displays real-time sensor data on an I2C LCD.
- * Key features: hysteresis-based pump control, environmental thresholds, float switch
- * for water level detection, and LCD interference mitigation during pump operation.
+ * automatically control a water pump. Features include:
+ * - I2C LCD display for real-time monitoring
+ * - WiFi Access Point mode for remote monitoring
+ * - Web server with live data dashboard
+ * - Hysteresis-based pump control with environmental adaptation
+ * - Safety checks: water level detection, pump interrupt during web access
  */
 
 #include <stdio.h>
@@ -22,8 +25,40 @@
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "driver/i2c.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_http_server.h"
+#include "esp_mac.h"
 
 static const char *TAG = "SMART_BASIL";
+
+// ============================================================================
+// WiFi AP CONFIGURATION
+// ============================================================================
+#define AP_SSID         "SmartBasil"           // WiFi network name
+#define AP_PASS         "smartbasil123"        // WiFi password (min 8 chars)
+#define AP_CHANNEL      1                       // WiFi channel
+#define AP_MAX_CLIENTS  4                       // Max connected clients
+
+// ============================================================================
+// GLOBAL SENSOR DATA (shared between main loop and HTTP handlers)
+// ============================================================================
+static struct {
+    int water_ok;              // 1=water OK, 0=low
+    int soil_percent;          // Soil moisture percentage
+    int soil_raw;              // Raw ADC value
+    float temp_c;              // Temperature in Celsius
+    float temp_f;              // Temperature in Fahrenheit
+    float hum_rh;              // Humidity in %RH
+    int pump_on;               // 1=pump ON, 0=pump OFF
+    int on_threshold;          // Current pump ON threshold
+    int off_threshold;         // Current pump OFF threshold
+} sensor_data = {0};
+
+// Mutex for thread-safe access to sensor data
+static SemaphoreHandle_t sensor_data_mutex = NULL;
 
 // ADC handle for soil moisture sensor
 static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
@@ -118,7 +153,6 @@ static inline int clamp_i(int value, int lo, int hi)
 {
     return value < lo ? lo : value > hi ? hi : value;
 }
-
 
 /**
  * Initialize pump GPIO as output and set initial state to OFF.
@@ -499,7 +533,6 @@ static esp_err_t lcd_show_status(int water_ok, int soil_percent, float temp_f, f
     return lcd_print(buf);
 }
 
-
 // ============================================================================
 // TEMPERATURE/HUMIDITY SENSOR - Adafruit SHT31-D I2C Driver
 // ============================================================================
@@ -615,7 +648,6 @@ static esp_err_t sht31_read_values(float *temp_c, float *hum_rh)
     return ESP_OK;
 }
 
-
 // ============================================================================
 // HARDWARE INITIALIZATION
 // ============================================================================
@@ -654,6 +686,364 @@ static void soil_adc_init(void)
 }
 
 // ============================================================================
+// WiFi EVENT HANDLER
+// ============================================================================
+
+/**
+ * WiFi event handler for AP mode.
+ */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        ESP_LOGI(TAG, "WiFi AP started");
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
+        ESP_LOGI(TAG, "Station "MACSTR" joined, AID=%d", MAC2STR(event->mac), event->aid);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
+        ESP_LOGI(TAG, "Station "MACSTR" left, AID=%d", MAC2STR(event->mac), event->aid);
+    }
+}
+
+// ============================================================================
+// HTTP REQUEST HANDLERS
+// ============================================================================
+
+/**
+ * HTTP GET handler for /api/status - returns JSON with all sensor data
+ */
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    // Acquire mutex to safely read sensor data
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    
+    // Create JSON response manually (no external dependency)
+    char json_response[512];
+    snprintf(json_response, sizeof(json_response),
+        "{"
+        "\"water_ok\":%d,"
+        "\"soil_percent\":%d,"
+        "\"soil_raw\":%d,"
+        "\"temp_c\":%.2f,"
+        "\"temp_f\":%.2f,"
+        "\"hum_rh\":%.2f,"
+        "\"pump_on\":%d,"
+        "\"pump_on_threshold\":%d,"
+        "\"pump_off_threshold\":%d"
+        "}",
+        sensor_data.water_ok,
+        sensor_data.soil_percent,
+        sensor_data.soil_raw,
+        sensor_data.temp_c,
+        sensor_data.temp_f,
+        sensor_data.hum_rh,
+        sensor_data.pump_on,
+        sensor_data.on_threshold,
+        sensor_data.off_threshold
+    );
+    
+    // Release mutex
+    xSemaphoreGive(sensor_data_mutex);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_response, strlen(json_response));
+    
+    return ESP_OK;
+}
+
+/**
+ * HTTP GET handler for / - returns HTML web interface
+ */
+static esp_err_t root_get_handler(httpd_req_t *req)
+{
+    const char *html_page = 
+        "<!DOCTYPE html>\n"
+        "<html lang='en'>\n"
+        "<head>\n"
+        "  <meta charset='UTF-8'>\n"
+        "  <meta name='viewport' content='width=device-width, initial-scale=1.0'>\n"
+        "  <title>Smart Basil - Plant Monitor</title>\n"
+        "  <style>\n"
+        "    * { margin: 0; padding: 0; box-sizing: border-box; }\n"
+        "    body {\n"
+        "      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\n"
+        "      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n"
+        "      min-height: 100vh;\n"
+        "      display: flex;\n"
+        "      justify-content: center;\n"
+        "      align-items: center;\n"
+        "      padding: 20px;\n"
+        "    }\n"
+        "    .container {\n"
+        "      background: white;\n"
+        "      border-radius: 20px;\n"
+        "      box-shadow: 0 20px 60px rgba(0,0,0,0.3);\n"
+        "      padding: 40px;\n"
+        "      max-width: 600px;\n"
+        "      width: 100%;\n"
+        "    }\n"
+        "    h1 {\n"
+        "      color: #333;\n"
+        "      margin-bottom: 30px;\n"
+        "      text-align: center;\n"
+        "      font-size: 2.5em;\n"
+        "    }\n"
+        "    .status-grid {\n"
+        "      display: grid;\n"
+        "      grid-template-columns: 1fr 1fr;\n"
+        "      gap: 20px;\n"
+        "      margin-bottom: 30px;\n"
+        "    }\n"
+        "    .status-card {\n"
+        "      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n"
+        "      color: white;\n"
+        "      padding: 20px;\n"
+        "      border-radius: 15px;\n"
+        "      text-align: center;\n"
+        "    }\n"
+        "    .status-card h3 {\n"
+        "      font-size: 0.9em;\n"
+        "      opacity: 0.9;\n"
+        "      margin-bottom: 10px;\n"
+        "      text-transform: uppercase;\n"
+        "      letter-spacing: 1px;\n"
+        "    }\n"
+        "    .status-value {\n"
+        "      font-size: 2.2em;\n"
+        "      font-weight: bold;\n"
+        "    }\n"
+        "    .water-ok { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }\n"
+        "    .water-low { background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%); }\n"
+        "    .pump-on { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }\n"
+        "    .pump-off { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }\n"
+        "    .detail-section {\n"
+        "      background: #f8f9fa;\n"
+        "      padding: 20px;\n"
+        "      border-radius: 10px;\n"
+        "      margin-bottom: 20px;\n"
+        "    }\n"
+        "    .detail-row {\n"
+        "      display: flex;\n"
+        "      justify-content: space-between;\n"
+        "      padding: 10px 0;\n"
+        "      border-bottom: 1px solid #e0e0e0;\n"
+        "    }\n"
+        "    .detail-row:last-child { border-bottom: none; }\n"
+        "    .detail-label {\n"
+        "      color: #666;\n"
+        "      font-weight: 500;\n"
+        "    }\n"
+        "    .detail-value {\n"
+        "      color: #333;\n"
+        "      font-weight: bold;\n"
+        "      font-family: 'Monaco', monospace;\n"
+        "    }\n"
+        "    .progress-bar {\n"
+        "      width: 100%;\n"
+        "      height: 8px;\n"
+        "      background: #e0e0e0;\n"
+        "      border-radius: 10px;\n"
+        "      overflow: hidden;\n"
+        "      margin-top: 8px;\n"
+        "    }\n"
+        "    .progress-fill {\n"
+        "      height: 100%;\n"
+        "      background: linear-gradient(90deg, #11998e 0%, #38ef7d 100%);\n"
+        "      transition: width 0.3s ease;\n"
+        "    }\n"
+        "    .loading { text-align: center; color: #999; }\n"
+        "    .error { color: #d32f2f; text-align: center; }\n"
+        "  </style>\n"
+        "</head>\n"
+        "<body>\n"
+        "  <div class='container'>\n"
+        "    <h1>🌿 Smart Basil</h1>\n"
+        "    <div class='status-grid'>\n"
+        "      <div class='status-card' id='water-status'>\n"
+        "        <h3>Water Level</h3>\n"
+        "        <div class='status-value'>--</div>\n"
+        "      </div>\n"
+        "      <div class='status-card' id='pump-status'>\n"
+        "        <h3>Pump Status</h3>\n"
+        "        <div class='status-value'>--</div>\n"
+        "      </div>\n"
+        "      <div class='status-card' id='soil-status'>\n"
+        "        <h3>Soil Moisture</h3>\n"
+        "        <div class='status-value'>--%</div>\n"
+        "      </div>\n"
+        "      <div class='status-card' id='temp-status'>\n"
+        "        <h3>Temperature</h3>\n"
+        "        <div class='status-value'>--°F</div>\n"
+        "      </div>\n"
+        "    </div>\n"
+        "    <div class='detail-section'>\n"
+        "      <h3 style='margin-bottom: 15px; color: #333;'>Sensor Details</h3>\n"
+        "      <div class='detail-row'>\n"
+        "        <span class='detail-label'>Soil Moisture</span>\n"
+        "        <div>\n"
+        "          <span class='detail-value' id='detail-soil'>--%</span>\n"
+        "          <div class='progress-bar'>\n"
+        "            <div class='progress-fill' id='soil-progress' style='width: 0%'></div>\n"
+        "          </div>\n"
+        "        </div>\n"
+        "      </div>\n"
+        "      <div class='detail-row'>\n"
+        "        <span class='detail-label'>Temperature</span>\n"
+        "        <span class='detail-value' id='detail-temp'>--°F / --°C</span>\n"
+        "      </div>\n"
+        "      <div class='detail-row'>\n"
+        "        <span class='detail-label'>Humidity</span>\n"
+        "        <span class='detail-value' id='detail-hum'>--%</span>\n"
+        "      </div>\n"
+        "      <div class='detail-row'>\n"
+        "        <span class='detail-label'>Pump ON Threshold</span>\n"
+        "        <span class='detail-value' id='detail-on-thresh'>--%</span>\n"
+        "      </div>\n"
+        "      <div class='detail-row'>\n"
+        "        <span class='detail-label'>Pump OFF Threshold</span>\n"
+        "        <span class='detail-value' id='detail-off-thresh'>--%</span>\n"
+        "      </div>\n"
+        "    </div>\n"
+        "    <div id='status-message' class='loading'>Loading sensor data...</div>\n"
+        "  </div>\n"
+        "  <script>\n"
+        "    function updateData() {\n"
+        "      fetch('/api/status')\n"
+        "        .then(response => response.json())\n"
+        "        .then(data => {\n"
+        "          const waterStatus = document.getElementById('water-status');\n"
+        "          if (data.water_ok) {\n"
+        "            waterStatus.className = 'status-card water-low';\n"
+        "            waterStatus.querySelector('.status-value').textContent = 'LOW';\n"
+        "          } else {\n"
+        "            waterStatus.className = 'status-card water-ok';\n"
+        "            waterStatus.querySelector('.status-value').textContent = 'OK';\n"
+        "          }\n"
+        "          const pumpStatus = document.getElementById('pump-status');\n"
+        "          if (data.pump_on) {\n"
+        "            pumpStatus.className = 'status-card pump-on';\n"
+        "            pumpStatus.querySelector('.status-value').textContent = 'ON';\n"
+        "          } else {\n"
+        "            pumpStatus.className = 'status-card pump-off';\n"
+        "            pumpStatus.querySelector('.status-value').textContent = 'OFF';\n"
+        "          }\n"
+        "          document.getElementById('soil-status').querySelector('.status-value').textContent = data.soil_percent + '%';\n"
+        "          document.getElementById('temp-status').querySelector('.status-value').textContent = data.temp_f.toFixed(1) + '°F';\n"
+        "          document.getElementById('detail-soil').textContent = data.soil_percent + '%';\n"
+        "          document.getElementById('soil-progress').style.width = data.soil_percent + '%';\n"
+        "          document.getElementById('detail-temp').textContent = data.temp_f.toFixed(1) + '°F / ' + data.temp_c.toFixed(1) + '°C';\n"
+        "          document.getElementById('detail-hum').textContent = data.hum_rh.toFixed(1) + '%';\n"
+        "          document.getElementById('detail-on-thresh').textContent = data.pump_on_threshold + '%';\n"
+        "          document.getElementById('detail-off-thresh').textContent = data.pump_off_threshold + '%';\n"
+        "          document.getElementById('status-message').textContent = 'Last updated: ' + new Date().toLocaleTimeString();\n"
+        "          document.getElementById('status-message').className = '';\n"
+        "        })\n"
+        "        .catch(error => {\n"
+        "          document.getElementById('status-message').textContent = 'Error loading data: ' + error;\n"
+        "          document.getElementById('status-message').className = 'error';\n"
+        "        });\n"
+        "    }\n"
+        "    updateData();\n"
+        "    setInterval(updateData, 2000);\n"
+        "  </script>\n"
+        "</body>\n"
+        "</html>";
+    
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html_page, strlen(html_page));
+    
+    return ESP_OK;
+}
+
+/**
+ * Start HTTP server and register URI handlers
+ */
+static httpd_handle_t start_webserver(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = 2;
+    
+    httpd_handle_t server = NULL;
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Register URI handlers
+        httpd_uri_t root = {
+            .uri       = "/",
+            .method    = HTTP_GET,
+            .handler   = root_get_handler,
+            .user_ctx  = NULL
+        };
+        httpd_register_uri_handler(server, &root);
+        
+        httpd_uri_t status_api = {
+            .uri       = "/api/status",
+            .method    = HTTP_GET,
+            .handler   = status_get_handler,
+            .user_ctx  = NULL
+        };
+        httpd_register_uri_handler(server, &status_api);
+        
+        ESP_LOGI(TAG, "Web server started");
+    }
+    return server;
+}
+
+// ============================================================================
+// WiFi INITIALIZATION
+// ============================================================================
+
+/**
+ * Initialize WiFi in AP (Access Point) mode
+ */
+static void wifi_init_ap(void)
+{
+    // Initialize NVS for WiFi storage
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    
+    // Initialize network interface
+    ESP_ERROR_CHECK(esp_netif_init());
+    
+    // Create default event loop
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    
+    // Create WiFi AP interface
+    esp_netif_create_default_wifi_ap();
+    
+    // Initialize WiFi
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    
+    // Register WiFi event handler
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    
+    // Configure WiFi AP
+    wifi_config_t wifi_config = {
+        .ap = {
+            .ssid = AP_SSID,
+            .ssid_len = strlen(AP_SSID),
+            .channel = AP_CHANNEL,
+            .password = AP_PASS,
+            .max_connection = AP_MAX_CLIENTS,
+            .authmode = WIFI_AUTH_WPA_WPA2_PSK,
+        },
+    };
+    
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    ESP_LOGI(TAG, "WiFi AP initialized");
+    ESP_LOGI(TAG, "  SSID: %s", AP_SSID);
+    ESP_LOGI(TAG, "  Password: %s", AP_PASS);
+    ESP_LOGI(TAG, "  Visit http://192.168.4.1 from a connected device");
+}
+
+// ============================================================================
 // MAIN APPLICATION - Automated Plant Watering Control Loop
 // ============================================================================
 
@@ -662,17 +1052,38 @@ void app_main(void)
     // Set log verbosity
     esp_log_level_set("*", ESP_LOG_INFO);
 
+    // ========== MUTEX INITIALIZATION ==========
+    sensor_data_mutex = xSemaphoreCreateMutex();
+    if (sensor_data_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create sensor data mutex");
+        return;
+    }
+
     // ========== HARDWARE INITIALIZATION ==========
     ESP_LOGI(TAG, "Initializing hardware...");
 
     ESP_ERROR_CHECK(i2c_master_init());      // I2C bus for LCD and SHT31
-    ESP_ERROR_CHECK(lcd_init());              // Initialize LCD display
+    
+    esp_err_t lcd_ret = lcd_init();           // Initialize LCD display
+    if (lcd_ret != ESP_OK) {
+        ESP_LOGW(TAG, "LCD initialization failed: %s (proceeding without display)", esp_err_to_name(lcd_ret));
+    }
+    
     float_switch_init();                      // Water level sensor
     soil_adc_init();                          // Soil moisture ADC
     pump_gpio_init();                         // Water pump GPIO
 
+    // ========== WiFi & WEB SERVER INITIALIZATION ==========
+    ESP_LOGI(TAG, "Initializing WiFi and web server...");
+    wifi_init_ap();
+    httpd_handle_t server = start_webserver();
+    if (server == NULL) {
+        ESP_LOGE(TAG, "Failed to start web server");
+    }
+
     ESP_LOGI(TAG, "Initialization complete.");
     ESP_LOGI(TAG, "Entering main control loop...");
+    
     // ========== PERSISTENT STATE VARIABLES ==========
     int pump_on = 0;                    // Current pump state
     bool lcd_enabled = true;            // Track LCD state
@@ -705,6 +1116,19 @@ void app_main(void)
         int on_threshold = SOIL_PERCENT_PUMP_ON_THRESHOLD;
         int off_threshold = SOIL_PERCENT_PUMP_OFF_THRESHOLD;
         adjust_soil_thresholds(temp_c, hum_rh, &on_threshold, &off_threshold);
+
+        // ===== UPDATE SHARED SENSOR DATA (for web server) =====
+        xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+        sensor_data.water_ok = water_ok;
+        sensor_data.soil_percent = soil_percent;
+        sensor_data.soil_raw = soil_raw;
+        sensor_data.temp_c = temp_c;
+        sensor_data.temp_f = temp_f;
+        sensor_data.hum_rh = hum_rh;
+        sensor_data.pump_on = pump_on;
+        sensor_data.on_threshold = on_threshold;
+        sensor_data.off_threshold = off_threshold;
+        xSemaphoreGive(sensor_data_mutex);
 
         // Log sensor readings
         ESP_LOGI(TAG, "Float=%d Soil=%d%% (raw=%d) Temp=%.2fF Hum=%.2f%% (SHT31=%s)",
