@@ -67,7 +67,7 @@ static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
 // PIN & I2C DEFINITIONS
 // ============================================================================
 
-// GPIO pin for water level float switch (1=water OK, 0=water low)
+// GPIO pin for water level float switch (active-low input with pull-up)
 #define FLOAT_SWITCH_PIN     27
 
 // Soil moisture ADC configuration
@@ -481,7 +481,7 @@ static esp_err_t lcd_show_status(int water_ok, int soil_percent, float temp_f, f
     err = lcd_set_cursor(0, 0);
     if (err != ESP_OK) return err;
     
-    len = snprintf(buf, sizeof(buf), "Water Level:%s", water_ok ? "LOW" : "GOOD");
+    len = snprintf(buf, sizeof(buf), "Water Level:%s", water_ok ? "GOOD" : "LOW");
     if (len >= sizeof(buf)) len = sizeof(buf) - 1;
     memset(buf + len, ' ', 20 - len);  // Pad with spaces
     buf[20] = '\0';
@@ -914,11 +914,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "        .then(data => {\n"
         "          const waterStatus = document.getElementById('water-status');\n"
         "          if (data.water_ok) {\n"
-        "            waterStatus.className = 'status-card water-low';\n"
-        "            waterStatus.querySelector('.status-value').textContent = 'LOW';\n"
-        "          } else {\n"
         "            waterStatus.className = 'status-card water-ok';\n"
         "            waterStatus.querySelector('.status-value').textContent = 'OK';\n"
+        "          } else {\n"
+        "            waterStatus.className = 'status-card water-low';\n"
+        "            waterStatus.querySelector('.status-value').textContent = 'LOW';\n"
         "          }\n"
         "          const pumpStatus = document.getElementById('pump-status');\n"
         "          if (data.pump_on) {\n"
@@ -1144,7 +1144,7 @@ void app_main(void)
         bool pump_state_changed = false;
         
         // TURN PUMP ON: soil below threshold AND water available AND pump is off
-        if (water_ok == 0 && soil_percent < on_threshold && !pump_on) {
+        if (water_ok && soil_percent < on_threshold && !pump_on) {
             pump_set(1);
             pump_on = 1;
             pump_state_changed = true;
@@ -1161,7 +1161,7 @@ void app_main(void)
         }
         
         // TURN PUMP OFF: soil above threshold OR no water available
-        if ((soil_percent > off_threshold && pump_on) || water_ok == 1) {
+        if ((soil_percent > off_threshold && pump_on) || !water_ok) {
             pump_set(0);
             pump_on = 0;
             pump_state_changed = true;
