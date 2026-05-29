@@ -986,7 +986,7 @@ void app_main(void)
             bool lcd_reset_success = false;
             for (int retry = 0; retry < 3 && !lcd_reset_success; retry++) {
                 if (lcd_clear() == ESP_OK) {
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    vTaskDelay(pdMS_TO_TICKS(20));
                     if (lcd_display_on() == ESP_OK) {
                         lcd_enabled = true;
                         lcd_reset_success = true;
@@ -994,7 +994,7 @@ void app_main(void)
                     }
                 }
                 if (!lcd_reset_success && retry < 2) {
-                    vTaskDelay(pdMS_TO_TICKS(50));  // Wait before retry
+                    vTaskDelay(pdMS_TO_TICKS(200));  // Wait before retry
                 }
             }
             if (!lcd_reset_success) {
