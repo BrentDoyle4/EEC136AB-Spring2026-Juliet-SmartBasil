@@ -955,16 +955,18 @@ void app_main(void)
         
         // TURN PUMP ON: soil below threshold AND water available AND pump is off
         if (water_ok && soil_percent < on_threshold && !pump_on) {
-            pump_set(1);
-            pump_on = 1;
-            pump_state_changed = true;
-            ESP_LOGI(TAG, "Pump ON (soil moisture %d%% < threshold %d%%)", soil_percent, on_threshold);
-            
             // Turn off LCD during pump operation to prevent electrical interference
             if (lcd_display_off() == ESP_OK) {
                 lcd_enabled = false;
                 ESP_LOGI(TAG, "LCD disabled (pump running)");
             }
+
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            pump_set(1);
+            pump_on = 1;
+            pump_state_changed = true;
+            ESP_LOGI(TAG, "Pump ON (soil moisture %d%% < threshold %d%%)", soil_percent, on_threshold);
             
             // Let power supply stabilize
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -978,7 +980,7 @@ void app_main(void)
             ESP_LOGI(TAG, "Pump OFF (soil moisture %d%% > threshold %d%% OR water low)", soil_percent, off_threshold);
             
             // Extended delay for electrical interference to dissipate
-            vTaskDelay(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(500));
 
             // Reset and reactivate LCD with retry logic (pump interference may cause errors)
             bool lcd_reset_success = false;
