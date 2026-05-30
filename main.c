@@ -1,13 +1,11 @@
 /*
  * Smart Basil - Automated Plant Watering System with WiFi Web Interface
- * 
  * This ESP32-based system monitors soil moisture, temperature, and humidity to
  * automatically control a water pump. Features include:
  * - I2C LCD display for real-time monitoring
  * - WiFi Access Point mode for remote monitoring
  * - Web server with live data dashboard
  * - Hysteresis-based pump control with environmental adaptation
- * - Safety checks: water level detection, pump interrupt during web access
  */
 
 #include <stdio.h>
@@ -34,17 +32,13 @@
 
 static const char *TAG = "SMART_BASIL";
 
-// ============================================================================
 // WiFi AP CONFIGURATION
-// ============================================================================
 #define AP_SSID         "SmartBasil"           // WiFi network name
 #define AP_PASS         "smartbasil123"        // WiFi password (min 8 chars)
 #define AP_CHANNEL      1                       // WiFi channel
 #define AP_MAX_CLIENTS  4                       // Max connected clients
 
-// ============================================================================
-// GLOBAL SENSOR DATA (shared between main loop and HTTP handlers)
-// ============================================================================
+// GLOBAL SENSOR DATA
 static struct {
     int water_ok;              // 1=water OK, 0=low
     int soil_percent;          // Soil moisture percentage
@@ -63,10 +57,6 @@ static SemaphoreHandle_t sensor_data_mutex = NULL;
 // ADC handle for soil moisture sensor
 static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
 
-// ============================================================================
-// PIN & I2C DEFINITIONS
-// ============================================================================
-
 // GPIO pin for water level float switch (active-low input with pull-up)
 #define FLOAT_SWITCH_PIN     27
 
@@ -78,7 +68,7 @@ static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
 // Soil moisture calibration: raw ADC values at dry and wet conditions
 // CALIBRATION NEEDED: Measure raw ADC values for your specific sensor
 #define SOIL_ADC_DRY_RAW     2850   // Raw ADC when soil is dry
-#define SOIL_ADC_WET_RAW     1375   // Raw ADC when soil is wet (estimate)
+#define SOIL_ADC_WET_RAW     1375   // Raw ADC when soil is wet
 
 // Base pump control thresholds (% soil moisture)
 #define SOIL_PERCENT_PUMP_ON_THRESHOLD   40  // Turn pump ON below this
@@ -91,7 +81,7 @@ static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
 #define SOIL_PERCENT_PUMP_OFF_MAX       70
 
 // Water pump control
-#define PUMP_GPIO            25      // GPIO for pump relay (IRF520 SIG pin)
+#define PUMP_GPIO            25      // GPIO for pump relay
 
 // I2C communication configuration (shared by LCD and temperature sensor)
 #define I2C_MASTER_SDA       21      // SDA pin
@@ -123,7 +113,6 @@ static esp_err_t i2c_master_init(void)
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
         .master.clk_speed = I2C_MASTER_FREQ_HZ,
     };
-
     esp_err_t err = i2c_param_config(i2c_port, &conf);
     if (err != ESP_OK) {
         return err;
@@ -139,17 +128,10 @@ static esp_err_t i2c_master_init(void)
 // UTILITY FUNCTIONS
 // ============================================================================
 
-/**
- * Clamp an integer value between minimum and maximum bounds.
-*/
-static inline int clamp_i(int value, int lo, int hi)
-{
-    return value < lo ? lo : value > hi ? hi : value;
-}
+// Clamp an integer value between minimum and maximum bounds.
+static inline int clamp_i(int value, int lo, int hi){return value < lo ? lo : value > hi ? hi : value;}
 
-/**
- * Initialize pump GPIO as output and set initial state to OFF.
- */
+// Initialize pump GPIO as output and set initial state to OFF.
 static void pump_gpio_init(void)
 {
     gpio_config_t io_conf = {
@@ -164,10 +146,7 @@ static void pump_gpio_init(void)
 }
 
 // Set pump state (ON or OFF).
-static void pump_set(int on)
-{
-    gpio_set_level(PUMP_GPIO, on ? 1 : 0);
-}
+static void pump_set(int on){gpio_set_level(PUMP_GPIO, on ? 1 : 0);}
 
 /*
  * Adjust pump control thresholds based on ambient temperature and humidity.
@@ -201,12 +180,11 @@ static void adjust_soil_thresholds(float temp_c, float hum_rh, int *on_threshold
     // Apply adjustments and clamp to safe ranges
     int on_adj = SOIL_PERCENT_PUMP_ON_THRESHOLD + temp_adj + hum_adj;
     int off_adj = SOIL_PERCENT_PUMP_OFF_THRESHOLD + temp_adj + hum_adj;
-
     *on_threshold = clamp_i(on_adj, SOIL_PERCENT_PUMP_ON_MIN, SOIL_PERCENT_PUMP_ON_MAX);
     *off_threshold = clamp_i(off_adj, SOIL_PERCENT_PUMP_OFF_MIN, SOIL_PERCENT_PUMP_OFF_MAX);
 }
 
-/**
+/*
  * Convert raw ADC reading to soil moisture percentage using linear interpolation.
  * Uses calibration values: dry=0%, wet=100%
  */
@@ -229,9 +207,9 @@ static int soil_raw_to_percent(int raw)
     return clamp_i(percent, 0, 100);
 }
 
-// ============================================================================
+// ==========================================================================
 // LCD DRIVER - Sunfounder I2C LCD2004 (4-bit parallel mode over I2C)
-// ============================================================================
+// ==========================================================================
 
 // Send raw I2C byte to LCD
 static esp_err_t lcd_i2c_write(uint8_t data)
@@ -398,7 +376,7 @@ static esp_err_t lcd_show_status(int water_ok, int soil_percent, float temp_f, f
     
     len = snprintf(buf, sizeof(buf), "Water Level:%s", water_ok ? "GOOD" : "LOW");
     if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-    memset(buf + len, ' ', 20 - len);  // Pad with spaces
+    memset(buf + len, ' ', 20 - len);
     buf[20] = '\0';
     
     err = lcd_print(buf);
@@ -448,9 +426,9 @@ static esp_err_t lcd_show_status(int water_ok, int soil_percent, float temp_f, f
     return lcd_print(buf);
 }
 
-// ============================================================================
+// ===========================================================
 // TEMPERATURE/HUMIDITY SENSOR - Adafruit SHT31-D I2C Driver
-// ============================================================================
+// ===========================================================
 
 // CRC-8 checksum for SHT31 data validation
 static uint8_t sht31_crc8(const uint8_t *data, size_t len)
@@ -466,10 +444,7 @@ static uint8_t sht31_crc8(const uint8_t *data, size_t len)
 }
 
 // Convert Celsius to Fahrenheit
-static float celsius_to_fahrenheit(float c)
-{
-    return c * 9.0f / 5.0f + 32.0f;
-}
+static float celsius_to_fahrenheit(float c){return c * 9.0f / 5.0f + 32.0f;}
 
 // Read temperature and humidity from SHT31 via I2C (includes CRC verification)
 static esp_err_t sht31_read_values(float *temp_c, float *hum_rh)
@@ -497,7 +472,7 @@ static esp_err_t sht31_read_values(float *temp_c, float *hum_rh)
     i2c_cmd_link_delete(cmdh);
     if (err != ESP_OK) return err;
 
-    // Wait for measurement to complete (~50ms for normal mode)
+    // Wait for measurement to complete 
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // Read measurement results: 6 bytes [TEMP_MSB, TEMP_LSB, TEMP_CRC, HUM_MSB, HUM_LSB, HUM_CRC]
@@ -550,24 +525,20 @@ static esp_err_t sht31_read_values(float *temp_c, float *hum_rh)
 // HARDWARE INITIALIZATION
 // ============================================================================
 
-/*
- * Initialize float switch (water level sensor) as digital input with pull-up.
- */
+// Initialize float switch (water level sensor) as digital input with pull-up.
 static void float_switch_init(void)
 {
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << FLOAT_SWITCH_PIN,
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,      // Pull high when floating
+        .pull_up_en = GPIO_PULLUP_ENABLE,      
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&io_conf);
 }
 
-/**
- * Initialize ADC for soil moisture sensor on ADC_UNIT_1, CHANNEL_6 (GPIO34).
- */
+// Initialize ADC for soil moisture sensor on ADC_UNIT_1, CHANNEL_6 (GPIO34).
 static void soil_adc_init(void)
 {
     adc_oneshot_unit_init_cfg_t init_cfg = {
@@ -583,9 +554,9 @@ static void soil_adc_init(void)
     ESP_ERROR_CHECK(adc_oneshot_config_channel(soil_adc_handle, SOIL_ADC_CHANNEL, &chan_cfg));
 }
 
-// ============================================================================
+// ==============================================================
 // WiFi EVENT HANDLER
-// ============================================================================
+// ==============================================================
 
 // WiFi event handler for AP mode
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -602,13 +573,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
-// ============================================================================
+// =========================================================================
 // HTTP REQUEST HANDLERS
-// ============================================================================
+// =========================================================================
 
-/**
- * HTTP GET handler for /api/status - returns JSON with all sensor data
- */
+// HTTP GET handler for /api/status - returns JSON with all sensor data
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
     // Acquire mutex to safely read sensor data
@@ -648,9 +617,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/**
- * HTTP GET handler for / - returns HTML web interface
- */
+// HTTP GET handler for / - returns HTML web interface
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     const char *html_page =
@@ -670,7 +637,6 @@ static httpd_handle_t start_webserver(void)
     
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) == ESP_OK) {
-        // Register URI handlers
         httpd_uri_t root = {
             .uri       = "/",
             .method    = HTTP_GET,
@@ -696,9 +662,7 @@ static httpd_handle_t start_webserver(void)
 // WiFi INITIALIZATION
 // ============================================================================
 
-/**
- * Initialize WiFi in AP (Access Point) mode
- */
+// Initialize WiFi in AP (Access Point) mode
 static void wifi_init_ap(void)
 {
     // Initialize NVS for WiFi storage
@@ -747,23 +711,20 @@ static void wifi_init_ap(void)
     ESP_LOGI(TAG, "  Visit http://192.168.4.1 from a connected device");
 }
 
-// ============================================================================
-// MAIN APPLICATION - Automated Plant Watering Control Loop
-// ============================================================================
+// ===========================================================================
+// MAIN APPLICATION
+// ===========================================================================
 
 void app_main(void)
 {
-    // Set log verbosity
     esp_log_level_set("*", ESP_LOG_INFO);
 
-    // ========== MUTEX INITIALIZATION ==========
     sensor_data_mutex = xSemaphoreCreateMutex();
     if (sensor_data_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create sensor data mutex");
         return;
     }
 
-    // ========== HARDWARE INITIALIZATION ==========
     ESP_LOGI(TAG, "Initializing hardware...");
 
     ESP_ERROR_CHECK(i2c_master_init());      // I2C bus for LCD and SHT31
@@ -777,7 +738,6 @@ void app_main(void)
     soil_adc_init();                          // Soil moisture ADC
     pump_gpio_init();                         // Water pump GPIO
 
-    // ========== WiFi & WEB SERVER INITIALIZATION ==========
     ESP_LOGI(TAG, "Initializing WiFi and web server...");
     wifi_init_ap();
     httpd_handle_t server = start_webserver();
@@ -788,13 +748,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Initialization complete.");
     ESP_LOGI(TAG, "Entering main control loop...");
     
-    // ========== PERSISTENT STATE VARIABLES ==========
     int pump_on = 0;                    // Current pump state
     bool lcd_enabled = true;            // Track LCD state
 
-    // ========== MAIN CONTROL LOOP ==========
     while (1) {
-        // ===== READ SENSOR INPUTS =====
         // Float switch: 1=water OK, 0=low
         int water_ok = gpio_get_level(FLOAT_SWITCH_PIN);
 
@@ -815,13 +772,12 @@ void app_main(void)
             temp_f = celsius_to_fahrenheit(temp_c);
         }
 
-        // ===== CALCULATE ADAPTIVE PUMP THRESHOLDS =====
         // Adjust thresholds based on temperature and humidity
         int on_threshold = SOIL_PERCENT_PUMP_ON_THRESHOLD;
         int off_threshold = SOIL_PERCENT_PUMP_OFF_THRESHOLD;
         adjust_soil_thresholds(temp_c, hum_rh, &on_threshold, &off_threshold);
 
-        // ===== UPDATE SHARED SENSOR DATA (for web server) =====
+        // Update Shared Sensor Data (for web server)
         xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
         sensor_data.water_ok = water_ok;
         sensor_data.soil_percent = soil_percent;
@@ -843,7 +799,6 @@ void app_main(void)
                  hum_rh,
                  sht_ret == ESP_OK ? "OK" : "ERR");
 
-        // ===== PUMP CONTROL LOGIC =====
         // Hysteresis-based control with water level safety check
         bool pump_state_changed = false;
         
@@ -888,7 +843,7 @@ void app_main(void)
                     }
                 }
                 if (!lcd_reset_success && retry < 2) {
-                    vTaskDelay(pdMS_TO_TICKS(200));  // Wait before retry
+                    vTaskDelay(pdMS_TO_TICKS(200));  
                 }
             }
             if (!lcd_reset_success) {
@@ -896,17 +851,16 @@ void app_main(void)
             }
         }
 
-        // ===== DISPLAY UPDATE =====
         // Update LCD with current status (only when enabled)
         if (lcd_enabled) {
             int retry_count = 0;
-            // More retries immediately after pump state change (interference may linger)
+            // More retries immediately after pump state change
             const int max_retries = pump_state_changed ? 5 : 2;
 
             // Attempt to update display with retries
             while (retry_count < max_retries) {
                 if (lcd_show_status(water_ok, soil_percent, temp_f, hum_rh) == ESP_OK) {
-                    break;  // Success
+                    break;
                 }
                 ESP_LOGW(TAG, "LCD update failed (attempt %d/%d)", retry_count + 1, max_retries);
                 retry_count++;
@@ -930,8 +884,6 @@ void app_main(void)
             }
         }
 
-        // ===== LOOP CONTROL =====
-        // Main loop period: 2 seconds between sensor reads
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
