@@ -141,11 +141,7 @@ static esp_err_t i2c_master_init(void)
 
 /**
  * Clamp an integer value between minimum and maximum bounds.
- * @param value The value to clamp
- * @param lo Minimum allowed value
- * @param hi Maximum allowed value
- * @return Clamped value within [lo, hi]
- */
+*/
 static inline int clamp_i(int value, int lo, int hi)
 {
     return value < lo ? lo : value > hi ? hi : value;
