@@ -8,7 +8,7 @@ Hardware: \
   DFRobot SEN0193 \
   3.3V/5V MOSFET Driver Module PWM Output Driving Boards Output 0-24V \
   Water Level Sensor Horizontal PP Side Mount Float Switch for Tank Pool \
-  Submersible 3V DC Water Pump - 1 Meter Vertical Type \
+  Submersible 3V DC Water Pump - 1 Meter Vertical Type 
 
 Source Code: \
 https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/index.html#get-started-build \
