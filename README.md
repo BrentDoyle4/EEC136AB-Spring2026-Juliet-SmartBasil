@@ -1,7 +1,7 @@
 # Smart-Basil
 This is the final software/firmware for Team Juliet's Senior Design project, Smart Basil. This is for the course EEC 136AB.
 
-ESP-32 Model: ESP32-WROOM-32E \
+Custom PCB ESP-32 Model: ESP32-WROOM-32E \
 Hardware: \
   IIC/I2C/TWI Serial 2004/20x4 LCD Module Shield \
   Adafruit Sensirion SHT31-D - Temperature & Humidity Sensor \
@@ -26,3 +26,4 @@ http://wiki.sunfounder.cc/index.php?title=I2C_LCD2004 \
 https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/misc_system_api.html \
 https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/network/esp_wifi.html \
 https://developer.espressif.com/blog/getting-started-with-wifi-on-esp-idf/ \
+https://esphome.io/guides/devboard_as_flasher/
