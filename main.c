@@ -81,14 +81,14 @@ static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
 #define SOIL_ADC_WET_RAW     1375   // Raw ADC when soil is wet (estimate)
 
 // Base pump control thresholds (% soil moisture)
-#define SOIL_PERCENT_PUMP_ON_THRESHOLD   10  // Turn pump ON below this
-#define SOIL_PERCENT_PUMP_OFF_THRESHOLD  20  // Turn pump OFF above this
+#define SOIL_PERCENT_PUMP_ON_THRESHOLD   40  // Turn pump ON below this
+#define SOIL_PERCENT_PUMP_OFF_THRESHOLD  60  // Turn pump OFF above this
 
 // Environmental adjustment bounds: thresholds adjusted within these limits
-#define SOIL_PERCENT_PUMP_ON_MIN        10
-#define SOIL_PERCENT_PUMP_ON_MAX        60
-#define SOIL_PERCENT_PUMP_OFF_MIN       20
-#define SOIL_PERCENT_PUMP_OFF_MAX       75
+#define SOIL_PERCENT_PUMP_ON_MIN        30
+#define SOIL_PERCENT_PUMP_ON_MAX        50
+#define SOIL_PERCENT_PUMP_OFF_MIN       50
+#define SOIL_PERCENT_PUMP_OFF_MAX       70
 
 // Water pump control
 #define PUMP_GPIO            25      // GPIO for pump relay (IRF520 SIG pin)
@@ -112,10 +112,7 @@ static adc_oneshot_unit_handle_t soil_adc_handle = NULL;
 // Global I2C port handle
 static const i2c_port_t i2c_port = I2C_MASTER_PORT;
 
-/**
- * Initialize I2C master interface for LCD and SHT31 sensor communication.
- * @return ESP_OK on success, error code otherwise
- */
+// Initialize I2C master interface for LCD and SHT31 sensor communication.
 static esp_err_t i2c_master_init(void)
 {
     i2c_config_t conf = {
@@ -170,25 +167,18 @@ static void pump_gpio_init(void)
     gpio_set_level(PUMP_GPIO, 0);  // Ensure pump is OFF at startup
 }
 
-/**
- * Set pump state (ON or OFF).
- * @param on 1 to turn pump ON, 0 to turn pump OFF
- */
+// Set pump state (ON or OFF).
 static void pump_set(int on)
 {
     gpio_set_level(PUMP_GPIO, on ? 1 : 0);
 }
 
-/**
+/*
  * Adjust pump control thresholds based on ambient temperature and humidity.
  * - High temp (>=30°C): increase thresholds (water more often)
  * - Low temp (<=18°C): decrease thresholds (water less often)
  * - Low humidity (<=35%): increase thresholds (water more often)
  * - High humidity (>=75%): decrease thresholds (water less often)
- * @param temp_c Ambient temperature in Celsius (NaN if unavailable)
- * @param hum_rh Ambient humidity in % RH (NaN if unavailable)
- * @param on_threshold Output: adjusted pump ON threshold (%)
- * @param off_threshold Output: adjusted pump OFF threshold (%)
  */
 static void adjust_soil_thresholds(float temp_c, float hum_rh, int *on_threshold, int *off_threshold)
 {
@@ -223,8 +213,6 @@ static void adjust_soil_thresholds(float temp_c, float hum_rh, int *on_threshold
 /**
  * Convert raw ADC reading to soil moisture percentage using linear interpolation.
  * Uses calibration values: dry=0%, wet=100%
- * @param raw Raw ADC value from soil moisture sensor
- * @return Soil moisture as percentage (0-100), or -1 if invalid
  */
 static int soil_raw_to_percent(int raw)
 {
@@ -249,11 +237,7 @@ static int soil_raw_to_percent(int raw)
 // LCD DRIVER - Sunfounder I2C LCD2004 (4-bit parallel mode over I2C)
 // ============================================================================
 
-/**
- * Write raw data byte to LCD via I2C.
- * @param data 8-bit value to send (includes command/data + control bits)
- * @return ESP_OK on success, error code otherwise
- */
+// Send raw I2C byte to LCD
 static esp_err_t lcd_i2c_write(uint8_t data)
 {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -278,98 +262,57 @@ static esp_err_t lcd_i2c_write(uint8_t data)
     return err;
 }
 
-/**
- * Pulse LCD enable line to latch data. Handles 4-bit parallel protocol.
- * @param data Value with high nibble set
- * @return ESP_OK on success, error code otherwise
- */
+// Pulse LCD enable line to latch data
 static esp_err_t lcd_strobe(uint8_t data)
 {
-    // Set enable high, latch data
     esp_err_t err = lcd_i2c_write(data | LCD_ENABLE | LCD_BACKLIGHT);
     if (err != ESP_OK) return err;
     
-    esp_rom_delay_us(1);  // Hold time
+    esp_rom_delay_us(1);
     
-    // Set enable low, complete pulse
     err = lcd_i2c_write((data & ~LCD_ENABLE) | LCD_BACKLIGHT);
     if (err != ESP_OK) return err;
     
-    esp_rom_delay_us(50);  // Setup time for next operation
+    esp_rom_delay_us(50);
     return ESP_OK;
 }
 
-/**
- * Send 4-bit nibble to LCD with optional mode.
- * @param nibble 4-bit value (upper 4 bits must be set)
- * @param mode Mode bits: 0 for command, LCD_REGISTER_SELECT for data
- * @return ESP_OK on success, error code otherwise
- */
+// Send 4-bit nibble to LCD
 static esp_err_t lcd_write4bits(uint8_t nibble, uint8_t mode)
 {
     uint8_t data = nibble | mode | LCD_BACKLIGHT;
     return lcd_strobe(data);
 }
 
-/**
- * Send 8-bit value to LCD as two 4-bit nibbles (8-bit mode).
- * @param value 8-bit command or data byte
- * @param mode Mode bits: 0 for command, LCD_REGISTER_SELECT for data
- * @return ESP_OK on success, error code otherwise
- */
+// Send 8-bit value as two 4-bit nibbles (8-bit mode)
 static esp_err_t lcd_send(uint8_t value, uint8_t mode)
 {
-    // Send high nibble
     esp_err_t err = lcd_write4bits(value & 0xF0, mode);
     if (err != ESP_OK) return err;
-    
-    // Send low nibble (shifted to upper 4 bits)
     return lcd_write4bits((value << 4) & 0xF0, mode);
 }
 
-/**
- * Send instruction/command to LCD (data mode = 0).
- * @param cmd Command byte
- * @return ESP_OK on success, error code otherwise
- */
+// Send command to LCD
 static esp_err_t lcd_command(uint8_t cmd)
 {
     return lcd_send(cmd, 0);
 }
 
-/**
- * Write single character to LCD at current cursor position.
- * @param c Character to display
- * @return ESP_OK on success, error code otherwise
- */
+// Write single character to LCD
 static esp_err_t lcd_write_char(char c)
 {
     return lcd_send((uint8_t)c, LCD_REGISTER_SELECT);
 }
 
-/**
- * Set LCD cursor position.
- * @param col Column (0-19)
- * @param row Row (0-3)
- * @return ESP_OK on success, error code otherwise
- */
+// Set LCD cursor position (col 0-19, row 0-3)
 static esp_err_t lcd_set_cursor(uint8_t col, uint8_t row)
 {
-    // DDRAM addresses for each row (4-line display)
     static const uint8_t row_offsets[] = {0x00, 0x40, 0x14, 0x54};
-    
-    // Bounds check
     if (row > 3) row = 3;
-    
-    // Set DDRAM address command: 0x80 | address
     return lcd_command(0x80 | (col + row_offsets[row]));
 }
 
-/**
- * Write null-terminated string to LCD at current cursor position.
- * @param str String to display
- * @return ESP_OK on success, error code otherwise
- */
+// Print string to LCD
 static esp_err_t lcd_print(const char *str)
 {
     while (*str) {
@@ -379,42 +322,29 @@ static esp_err_t lcd_print(const char *str)
     return ESP_OK;
 }
 
-/**
- * Clear LCD display and move cursor to home position.
- * @return ESP_OK on success, error code otherwise
- */
+// Clear LCD display
 static esp_err_t lcd_clear(void)
 {
-    esp_err_t err = lcd_command(0x01);  // Clear display command
+    esp_err_t err = lcd_command(0x01);
     if (err == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(2));   // Clear operation takes ~1.5ms
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
     return err;
 }
 
-/**
- * Turn LCD display OFF (data preserved).
- * @return ESP_OK on success, error code otherwise
- */
+// Turn LCD display off
 static esp_err_t lcd_display_off(void)
 {
-    return lcd_command(0x08);  // Display off, cursor off, blink off
+    return lcd_command(0x08);
 }
 
-/**
- * Turn LCD display ON.
- * @return ESP_OK on success, error code otherwise
- */
+// Turn LCD display on
 static esp_err_t lcd_display_on(void)
 {
-    return lcd_command(0x0C);  // Display on, cursor off, blink off
+    return lcd_command(0x0C);
 }
 
-/**
- * Initialize LCD display: set 4-bit mode, configure settings, clear screen.
- * Follows HD44780 initialization sequence for 4-bit mode.
- * @return ESP_OK on success, error code otherwise
- */
+// Initialize LCD display - sets up 4-bit mode and configures display
 static esp_err_t lcd_init(void)
 {
     vTaskDelay(pdMS_TO_TICKS(50));  // Power-on delay
@@ -459,18 +389,7 @@ static esp_err_t lcd_init(void)
     return lcd_command(0x0C);
 }
 
-/**
- * Display system status on LCD (4 lines, 20 chars per line).
- * Line 0: Water level status
- * Line 1: Soil moisture percentage
- * Line 2: Temperature in Fahrenheit
- * Line 3: Relative humidity
- * @param water_ok 1=water OK, 0=low
- * @param soil_percent Soil moisture (0-100%)
- * @param temp_f Temperature in Fahrenheit (NaN if unavailable)
- * @param hum_rh Humidity in % RH (NaN if unavailable)
- * @return ESP_OK on success, error code otherwise
- */
+// Display sensor readings on LCD (water level, soil %, temp, humidity)
 static esp_err_t lcd_show_status(int water_ok, int soil_percent, float temp_f, float hum_rh)
 {
     char buf[21];           // 20 chars + null terminator
@@ -537,13 +456,7 @@ static esp_err_t lcd_show_status(int water_ok, int soil_percent, float temp_f, f
 // TEMPERATURE/HUMIDITY SENSOR - Adafruit SHT31-D I2C Driver
 // ============================================================================
 
-/**
- * Compute CRC-8 checksum for SHT31 data validation.
- * Polynomial: 0x31 (CRC-8/MAXIM)
- * @param data Byte array
- * @param len Number of bytes
- * @return CRC-8 checksum
- */
+// CRC-8 checksum for SHT31 data validation
 static uint8_t sht31_crc8(const uint8_t *data, size_t len)
 {
     uint8_t crc = 0xFF;
@@ -556,24 +469,13 @@ static uint8_t sht31_crc8(const uint8_t *data, size_t len)
     return crc;
 }
 
-/**
- * Convert temperature from Celsius to Fahrenheit.
- * Formula: F = C * (9/5) + 32
- * @param c Temperature in Celsius
- * @return Temperature in Fahrenheit
- */
+// Convert Celsius to Fahrenheit
 static float celsius_to_fahrenheit(float c)
 {
     return c * 9.0f / 5.0f + 32.0f;
 }
 
-/**
- * Read temperature and humidity from SHT31 sensor via I2C.
- * Sends measurement command, waits for conversion, reads 6 bytes with CRC checks.
- * @param temp_c Output: temperature in Celsius
- * @param hum_rh Output: relative humidity in %
- * @return ESP_OK on success, error code otherwise
- */
+// Read temperature and humidity from SHT31 via I2C (includes CRC verification)
 static esp_err_t sht31_read_values(float *temp_c, float *hum_rh)
 {
     // SHT31 measurement command (clock stretching enabled)
@@ -652,7 +554,7 @@ static esp_err_t sht31_read_values(float *temp_c, float *hum_rh)
 // HARDWARE INITIALIZATION
 // ============================================================================
 
-/**
+/*
  * Initialize float switch (water level sensor) as digital input with pull-up.
  */
 static void float_switch_init(void)
@@ -689,9 +591,7 @@ static void soil_adc_init(void)
 // WiFi EVENT HANDLER
 // ============================================================================
 
-/**
- * WiFi event handler for AP mode.
- */
+// WiFi event handler for AP mode
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data)
 {
@@ -766,9 +666,7 @@ httpd_resp_set_type(req, "text/html");
     return ESP_OK;
 }
 
-/**
- * Start HTTP server and register URI handlers
- */
+// Start HTTP server with dashboard and API endpoints
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
